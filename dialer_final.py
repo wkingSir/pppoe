@@ -2,109 +2,137 @@ import subprocess
 import time
 import requests
 import os
+import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import tkinter as tk
-from tkinter import filedialog, simpledialog
+from tkinter import filedialog
 
-# --- 核心设置 ---
-ADSL_NAME = "宽带连接"
-TRAFFIC_MB_GOAL = 5  # 每个账号产生的流量目标 (MB)
-LOG_FILE = "dial_final_log.txt"
+# --- 配置与锁 ---
+CONFIG_FILE = "config.json"
+LOG_FILE = "dial_detail_log.txt"
+EXCEPTION_FILE = "traffic_exceptions.txt" # 专门存放异常账号
+DEFAULT_CONFIG = {
+    "target_urls": ["https://www.baidu.com"],
+    "traffic_mb_goal": 2.0,
+    "dial_name_prefix": "宽带连接",
+    "concurrent_limit": 10
+}
 
-def log(message):
-    timestamp = time.strftime("%H:%M:%S")
-    full_msg = f"[{timestamp}] {message}"
-    print(full_msg)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(full_msg + "\n")
+log_lock = threading.Lock()
+error_lock = threading.Lock() # 专门用于异常文件写入的锁
 
-def get_file_path(title, file_types):
-    root = tk.Tk()
-    root.withdraw()
-    path = filedialog.askopenfilename(title=title, filetypes=file_types)
-    return path
+def write_log(message):
+    with log_lock:
+        timestamp = time.strftime("%H:%M:%S")
+        print(f"[{timestamp}] {message}")
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {message}\n")
 
-def dial(user, password):
-    cmd = f'rasdial "{ADSL_NAME}" {user} {password}'
-    res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    return res.returncode == 0
+def record_exception(user, pwd, reason):
+    """将流量异常的账号和密码记录到独立文件"""
+    with error_lock:
+        with open(EXCEPTION_FILE, "a", encoding="utf-8") as f:
+            # 格式：账号,密码,异常原因,时间
+            f.write(f"{user},{pwd},{reason},{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
-def disconnect():
-    subprocess.run(f'rasdial "{ADSL_NAME}" /disconnect', shell=True, capture_output=True)
-
-def generate_traffic(urls, mb_goal):
-    downloaded_bytes = 0
-    goal_bytes = mb_goal * 1024 * 1024
-    log(f"开始流量任务，目标: {mb_goal}MB...")
-    
+def load_config():
+    if not os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(DEFAULT_CONFIG, f, indent=4)
+        return DEFAULT_CONFIG
     try:
-        while downloaded_bytes < goal_bytes:
-            for url in urls:
-                url = url.strip()
-                if not url.startswith("http"): continue
-                
-                log(f"正在读取: {url}")
-                # 使用 stream=True 确保产生真实下行流量
-                with requests.get(url, stream=True, timeout=15, verify=False) as r:
-                    for chunk in r.iter_content(chunk_size=16384): # 16KB 块读取
-                        if chunk:
-                            downloaded_bytes += len(chunk)
-                            if downloaded_bytes >= goal_bytes: break
-                if downloaded_bytes >= goal_bytes: break
-        log(f"✅ 流量达标: {downloaded_bytes / (1024*1024):.2f} MB")
-        return True
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return DEFAULT_CONFIG
+
+def dial_task(user, pwd, thread_id):
+    conf = load_config()
+    dial_name = conf.get("dial_name_prefix", "宽带连接")
+
+    # 1. 初始清理
+    subprocess.run(f'rasdial "{dial_name}" /disconnect', shell=True, capture_output=True)
+
+    # 2. 拨号
+    write_log(f"[T-{thread_id}] 尝试拨号: {user}")
+    res = subprocess.run(f'rasdial "{dial_name}" {user} {pwd}', shell=True, capture_output=True, text=True)
+
+    if res.returncode != 0:
+        error_msg = res.stdout.strip().replace("\n", " ")
+        write_log(f"[T-{thread_id}] ❌ 拨号失败: {user} | 原因: {error_msg}")
+        # 拨号失败通常不属于“流量异常”，但如果你需要，也可以记录
+        return
+
+    # 3. 流量产生逻辑
+    write_log(f"[T-{thread_id}] ✅ 拨号成功: {user}")
+    time.sleep(3) # 缓冲网络初始化
+
+    downloaded = 0
+    target_bytes = conf.get("traffic_mb_goal", 2.0) * 1024 * 1024
+    success_flag = False
+    failure_reason = "Unknown"
+
+    try:
+        start_time = time.time()
+        while downloaded < target_bytes:
+            # 动态获取当前配置中的网址
+            current_urls = load_config().get("target_urls", [])
+            if not current_urls:
+                failure_reason = "No URLs in config"
+                break
+
+            for url in current_urls:
+                try:
+                    with requests.get(url, stream=True, timeout=12, verify=False) as r:
+                        r.raise_for_status()
+                        for chunk in r.iter_content(chunk_size=65536):
+                            if chunk:
+                                downloaded += len(chunk)
+                                if downloaded >= target_bytes: break
+                except Exception as e:
+                    failure_reason = f"Access Error: {type(e).__name__}"
+                    write_log(f"[T-{thread_id}] ⚠️ 访问异常({url}): {failure_reason}")
+
+                if downloaded >= target_bytes: break
+
+            # 如果循环一圈还没产生任何流量，判定为异常
+            if downloaded == 0:
+                break
+
+        if downloaded >= target_bytes:
+            success_flag = True
+            write_log(f"[T-{thread_id}] 🚀 流量完成: {user} ({downloaded/(1024*1024):.2f}MB)")
+        else:
+            failure_reason = f"Traffic Incomplete ({downloaded/(1024*1024):.2f}MB)"
+
     except Exception as e:
-        log(f"❌ 流量异常: {e}")
-        return False
+        failure_reason = str(e)
+
+    # 4. 异常处理与导出
+    if not success_flag:
+        write_log(f"[T-{thread_id}] 🔺 记录异常账号: {user}")
+        record_exception(user, pwd, failure_reason)
+
+    # 5. 断开连接
+    subprocess.run(f'rasdial "{dial_name}" /disconnect', shell=True, capture_output=True)
 
 def main():
-    print("=== 宽带批量拨号(全动态配置版) V4.0 ===")
-    
-    # 1. 运行时加载账号文件
-    account_file = get_file_path("1. 请选择账号文件 (.txt)", [("Text", "*.txt")])
-    if not account_file: return
+    root = tk.Tk()
+    root.withdraw()
+    acc_path = filedialog.askopenfilename(title="请选择1000+账号文件", filetypes=[("Text", "*.txt")])
+    if not acc_path: return
 
-    # 2. 运行时加载网址文件
-    url_file = get_file_path("2. 请选择目标网址文件 (.txt)", [("Text", "*.txt")])
-    
-    target_urls = []
-    if url_file:
-        with open(url_file, "r", encoding="utf-8") as f:
-            target_urls = [line.strip() for line in f if line.strip()]
-    
-    # 如果没选文件，则手动输入一个
-    if not target_urls:
-        root = tk.Tk()
-        root.withdraw()
-        manual_url = simpledialog.askstring("输入网址", "未检测到网址文件，请输入一个默认访问地址:")
-        if not manual_url: return
-        target_urls = [manual_url]
+    with open(acc_path, "r", encoding="utf-8") as f:
+        accounts = [line.strip().split(",") for line in f if "," in line]
 
-    log(f"配置完成：账号文件({os.path.basename(account_file)}), 目标网址({len(target_urls)}个)")
+    conf = load_config()
+    write_log(f"已加载 {len(accounts)} 个账号。开始并发处理...")
 
-    while True:
-        with open(account_file, "r", encoding="utf-8") as f:
-            accounts = [line.strip().split(",") for line in f if "," in line]
-        
-        for user, pwd in accounts:
-            log(f"\n>>> 切换账号: {user}")
-            disconnect()
-            time.sleep(2)
-
-            if dial(user, pwd):
-                log("✅ 拨号成功！")
-                time.sleep(3) # 等待网络稳定
-                generate_traffic(target_urls, TRAFFIC_MB_GOAL)
-            else:
-                log(f"🔺 拨号失败: {user}")
-            
-            time.sleep(1)
-
-        op = input("\n[一轮结束] 'r'重跑 / 'q'退出: ")
-        if op.lower() == 'q': break
+    with ThreadPoolExecutor(max_workers=conf.get("concurrent_limit", 10)) as executor:
+        for i, (u, p) in enumerate(accounts):
+            executor.submit(dial_task, u, p, (i % 10) + 1)
+            time.sleep(1.5) # 错峰拨号，防止系统 rasdial 进程锁死
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"程序运行出错: {e}")
-        input("按回车键退出...")
+    main()
