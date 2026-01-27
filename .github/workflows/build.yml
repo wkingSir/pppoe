@@ -23,7 +23,7 @@ jobs:
       # 4. 执行打包命令
       - name: Build EXE
         run: |
-          pyinstaller --onefile --console --key="2wsxcde3" --name "拨号流量助手" auth_generator.py
+          pyinstaller --onefile --console --name "拨号流量助手" auth_generator.py
 
       # 5. 上传生成的 EXE (必须使用 v4)
       - name: Upload Artifact
