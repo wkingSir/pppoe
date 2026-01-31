@@ -8,7 +8,7 @@ from tkinter import filedialog, simpledialog
 
 # --- 核心配置 ---
 ADSL_NAME = "宽带连接"
-TRAFFIC_MB_GOAL = 2         # 每个账号下载的目标流量 (MB)
+TRAFFIC_MB_GOAL = 20         # 每个账号下载的目标流量 (MB)
 LOG_FILE = "dial_final_log.txt"
 DOWNLOAD_DIR = "downloads"  # 下载文件存放根目录
 DIAL_ERROR_FILE = "dial_failures.txt"
