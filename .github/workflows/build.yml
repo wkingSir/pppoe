@@ -23,12 +23,13 @@ jobs:
       # 4. 执行打包命令
       - name: Build EXE
         run: |
-          pyinstaller --onefile --console --name "拨号流量助手" dialer_final.py
+#          pyinstaller --onefile --console --name "拨号流量助手" dialer_final.py
+          pyinstaller --onefile --console --name "授权码生成器" auth_genrator.py
 
       # 5. 上传生成的 EXE (必须使用 v4)
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-exe-package  # 下载时的压缩包名称
-          path: dist/拨号流量助手.exe  # 对应 pyinstaller 生成的路径
+          path: dist/授权码生成器.exe  # 对应 pyinstaller 生成的路径
           retention-days: 5         # 文件保留天数
