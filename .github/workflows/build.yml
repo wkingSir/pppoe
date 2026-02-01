@@ -23,7 +23,6 @@ jobs:
       # 4. 执行打包命令
       - name: Build EXE
         run: |
-#          pyinstaller --onefile --console --name "拨号流量助手" dialer_final.py
           pyinstaller --onefile --console --name "授权码生成器" auth_genrator.py
 
       # 5. 上传生成的 EXE (必须使用 v4)
