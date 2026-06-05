@@ -3,6 +3,8 @@ import time
 import requests
 import os
 import shutil
+import random
+import string
 import tkinter as tk
 from tkinter import filedialog, simpledialog
 
@@ -14,6 +16,7 @@ LOG_FILE = "dial_final_log.txt"
 DOWNLOAD_DIR = "downloads"   # 下载文件存放根目录
 DIAL_ERROR_FILE = "dial_failures.txt"
 TRAFFIC_ERROR_FILE = "traffic_failures.txt"
+DISABLE_SSL_VERIFY = True    # 是否禁用 SSL 验证（仅在目标站点证书有问题时启用）
 
 def log(message):
     timestamp = time.strftime("%H:%M:%S")
@@ -34,15 +37,30 @@ def get_file_path(title):
     return path
 
 def dial(user, password):
-    cmd = f'rasdial "{ADSL_NAME}" {user} {password}'
-    res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    if res.returncode == 0:
-        return True, "OK"
-    return False, res.stdout.strip() or res.stderr.strip()
+    try:
+        res = subprocess.run(
+            ["rasdial", ADSL_NAME, user, password],
+            capture_output=True, text=True
+        )
+        if res.returncode == 0:
+            return True, "OK"
+        return False, res.stdout.strip() or res.stderr.strip()
+    except FileNotFoundError:
+        return False, "rasdial 命令不存在，请确认系统支持 PPPoE 拨号"
+    except Exception as e:
+        return False, f"拨号过程异常: {str(e)}"
 
 def disconnect():
     log("正在执行断开连接操作...")
-    subprocess.run(f'rasdial "{ADSL_NAME}" /disconnect', shell=True, capture_output=True)
+    try:
+        res = subprocess.run(
+            ["rasdial", ADSL_NAME, "/disconnect"],
+            capture_output=True, text=True
+        )
+        if res.returncode != 0:
+            log(f"⚠️ 断开连接警告: {res.stdout.strip() or res.stderr.strip()}")
+    except Exception as e:
+        log(f"⚠️ 断开连接异常: {str(e)}")
 
 def download_video_task(urls, mb_goal, user, pwd):
     user_dir = os.path.join(DOWNLOAD_DIR, user)
@@ -54,24 +72,34 @@ def download_video_task(urls, mb_goal, user, pwd):
     log(f"开始真实下行任务，目标: {mb_goal}MB...")
 
     with requests.Session() as session:
-        session.verify = False
+        session.verify = not DISABLE_SSL_VERIFY
+        if DISABLE_SSL_VERIFY:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         try:
             while downloaded_bytes < goal_bytes:
                 for url in urls:
                     url = url.strip()
                     if not url.startswith("http"): continue
-                    file_name = f"video_{int(time.time())}.mp4"
+                    rand_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+                    file_name = f"video_{int(time.time())}_{rand_suffix}.mp4"
                     save_path = os.path.join(user_dir, file_name)
 
-                    with session.get(url, stream=True, timeout=20) as r:
-                        r.raise_for_status()
-                        with open(save_path, 'wb') as f:
-                            for chunk in r.iter_content(chunk_size=128 * 1024):
-                                if chunk:
-                                    f.write(chunk)
-                                    downloaded_bytes += len(chunk)
-                                    if downloaded_bytes >= goal_bytes:
-                                        break
+                    try:
+                        with session.get(url, stream=True, timeout=20) as r:
+                            r.raise_for_status()
+                            with open(save_path, 'wb') as f:
+                                for chunk in r.iter_content(chunk_size=128 * 1024):
+                                    if chunk:
+                                        f.write(chunk)
+                                        downloaded_bytes += len(chunk)
+                                        if downloaded_bytes >= goal_bytes:
+                                            break
+                    except Exception as e:
+                        log(f"⚠️ 下载中断，清理不完整文件: {file_name}")
+                        if os.path.exists(save_path):
+                            os.remove(save_path)
+                        raise e
                     if downloaded_bytes >= goal_bytes: break
 
             log(f"✅ 流量任务已达成 ({downloaded_bytes / (1024*1024):.2f} MB)")
@@ -103,7 +131,16 @@ def main():
 
     while True:
         with open(account_file, "r", encoding="utf-8") as f:
-            accounts = [line.strip().split(",") for line in f if "," in line]
+            accounts = []
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(",")
+                if len(parts) != 2:
+                    log(f"⚠️ 账号文件第 {line_num} 行格式错误（应为: 用户名,密码），已跳过")
+                    continue
+                accounts.append(parts)
 
         log(f"总计加载 {len(accounts)} 个账号，开始执行任务...")
 
